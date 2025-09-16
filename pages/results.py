@@ -42,7 +42,4 @@ def show():
             st.error(f"Could not load processed_incidents_with_emotion.csv: {e}")
 
     st.write("")
-
-    # Back button
-    #st.button("⬅️ Back to start", on_click=lambda: st.session_state.update({"page": "Welcome"}))
     st.button("⬅️ Back to start", on_click=lambda: [st.session_state.update({"page": "Welcome"}), st.rerun()])

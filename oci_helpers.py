@@ -3,7 +3,7 @@ import io
 import time
 import pandas as pd
 import datetime as dt
-from typing import List
+from typing import List, Optional
 import streamlit as st
 import oci
 from oci.object_storage.models import CreatePreauthenticatedRequestDetails
@@ -15,6 +15,7 @@ def get_oci_client():
     return client, config
 
 def _build_oci_config() -> dict:
+    # Prefer secrets in production (HF Spaces, etc.)
     if "OCI_USER_OCID" in st.secrets:
         return {
             "user": st.secrets["OCI_USER_OCID"],
@@ -23,10 +24,10 @@ def _build_oci_config() -> dict:
             "fingerprint": st.secrets["OCI_FINGERPRINT"],
             "key_content": st.secrets["OCI_KEY_CONTENT"],
         }
+    # Fallback to local file
     cfg_path = os.getenv("OCI_CONFIG_PATH", os.path.expanduser("~/.oci/config"))
     profile = os.getenv("OCI_PROFILE", "DEFAULT")
     return oci.config.from_file(cfg_path, profile_name=profile)
-
 
 NAMESPACE = os.getenv("OCI_NAMESPACE", "sdzbwxl65lpx")
 BUCKET = os.getenv("OCI_BUCKET", "incident-data-bucket")
@@ -66,15 +67,21 @@ def delete_objects(names: List[str]) -> None:
         except Exception as e:
             st.toast(f"Couldn't delete {n}: {e}")
 
-def load_cloud_csv(object_name: str, columns: List[str] | None = None):
+def load_cloud_csv(object_name: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
     client, _ = get_oci_client()
     try:
         resp = client.get_object(NAMESPACE, BUCKET, object_name)
-        return pd.read_csv(io.BytesIO(resp.data.content))
+        df = pd.read_csv(io.BytesIO(resp.data.content))
+        # Ensure expected columns if provided
+        if columns:
+            for c in columns:
+                if c not in df.columns:
+                    df[c] = "" if c != "confidence (%)" else "0.00"
+        return df
     except Exception:
         return pd.DataFrame(columns=columns) if columns else pd.DataFrame()
 
-def upload_cloud_csv(object_name: str, df):
+def upload_cloud_csv(object_name: str, df: pd.DataFrame):
     client, _ = get_oci_client()
     bio = io.BytesIO()
     df.to_csv(bio, index=False)

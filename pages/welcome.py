@@ -6,19 +6,17 @@ from ui_helpers import confirmation_modal, show_csv  # Assuming these are in ui_
 MAX_SAMPLE_SELECTION = 10
 MAX_UPLOAD_FILES = 20
 
-# Add this at the top of welcome.py show()
+# Sidebar nav
 st.sidebar.markdown("## Navigation")
 if st.sidebar.button("⬅️ Welcome", key="btn_welcome"):
     st.session_state.page = "Welcome"
     st.rerun()
-
 if st.sidebar.button("📊 Results", key="btn_results"):
     st.session_state.page = "Results"
     st.rerun()
 
-
 def show():
-    # Hero welcome message
+    # Hero
     st.markdown("""
     <div class="app-hero">
       <h1>Welcome, <b>Lord Commander</b> ⚔️</h1>
@@ -85,6 +83,6 @@ def show():
                 st.session_state.page = "Processing"
                 st.rerun()
 
-    # Optionally show confirmation modal if pending action is set
+    # Optional modal
     if st.session_state.get("pending_action") in ("samples", "upload") and st.session_state.get("pending_files"):
         confirmation_modal()

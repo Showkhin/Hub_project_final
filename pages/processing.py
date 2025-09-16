@@ -17,7 +17,7 @@ def show_progress_ui():
         percent_text.markdown(f"**{p*100:.0f}% Complete**")
         if step_name:
             step_text.markdown(f"**Step:** {step_name}")
-        time.sleep(0.05)  # keep UI responsive
+        time.sleep(0.03)  # keep UI responsive
 
     return progress_callback
 
@@ -38,7 +38,6 @@ def show():
 
             names = st.session_state.pending_files
             run_emotion_pipeline_for_files(names, progress_cb=cb)
-
 
             st.session_state.processing = False
             st.session_state.pending_files = []
