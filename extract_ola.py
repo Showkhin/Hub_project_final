@@ -3,21 +3,21 @@ import os
 import json
 import pandas as pd
 import requests
-from difflib import get_close_matches
-
+from rapidfuzz import fuzz
 from oci_helpers import load_cloud_csv, upload_cloud_csv
 from utils import normalize_date, normalize_time
 
-# --- Files in bucket ---
-INPUT_OBJECT_NAME = 'processed_incidents_with_emotion.csv'
-OUTPUT_OBJECT_NAME = 'final_emotion_ensemble.csv'
-MAIN_OBJECT_NAME = 'main.csv'
+# --- Files ---
+INPUT_OBJECT_NAME = "processed_incidents_with_emotion.csv"
+OUTPUT_OBJECT_NAME = "final_emotion_ensemble.csv"
+MAIN_OBJECT_NAME = "main.csv"
 
 # --- Ollama API ---
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_STRUCT", "gemma3")
-OLLAMA_URL = os.getenv("OLLAMA_URL_GENERATE", "http://127.0.0.1:11434/api/generate")
+GEN_URL = os.getenv("OLLAMA_URL_GENERATE", "http://127.0.0.1:11434/api/generate")
+CHAT_URL = os.getenv("OLLAMA_URL_CHAT", "http://127.0.0.1:11434/v1/chat/completions")
 
-# --- Fields in final ensemble ---
+# --- Final Fields ---
 FIELDS = [
     "filename",
     "client_name",
@@ -32,11 +32,15 @@ FIELDS = [
     "reported_date",
     "organization name",
     "recurrence",
-    "emotion"
+    "emotion",
+    "needs_review",
+    "final_confidence",
 ]
+
 
 # --- Helpers ---
 def clean_markdown_json(text: str) -> str:
+    """Strip code fences around JSON."""
     t = text.strip()
     if t.startswith("```"):
         lines = t.splitlines()
@@ -45,124 +49,157 @@ def clean_markdown_json(text: str) -> str:
         return t.replace("```json", "").replace("```", "")
     return t
 
+
+def _ollama_extract_json(prompt: str) -> dict:
+    """Try Ollama generate first, then chat API."""
+    try:
+        r = requests.post(
+            GEN_URL, json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}, timeout=120
+        )
+        if r.status_code == 200:
+            raw = (r.json().get("response") or "").strip()
+            if raw:
+                return json.loads(clean_markdown_json(raw))
+    except Exception as e:
+        print(f"[Ollama generate failed] {e}")
+
+    try:
+        r = requests.post(
+            CHAT_URL,
+            json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": prompt}], "stream": False},
+            timeout=120,
+        )
+        if r.status_code == 200:
+            j = r.json()
+            raw = j["choices"][0]["message"]["content"].strip()
+            if raw:
+                return json.loads(clean_markdown_json(raw))
+    except Exception as e:
+        print(f"[Ollama chat failed] {e}")
+
+    return {}
+
+
 def extract_fields_from_transcription(transcription: str) -> dict:
-    if not transcription.strip():
-        return {field: "" for field in FIELDS[1:]}
+    """Call Ollama to extract fields from transcription text."""
+    if not str(transcription).strip():
+        return {field: "" for field in FIELDS if field not in ("filename", "emotion", "needs_review", "final_confidence")}
 
     prompt = (
-        "Extract all incident details from the following text as a JSON object.\n"
-        f"The object must have these fields exactly:\n{', '.join(FIELDS[1:])}.\n"
-        "If a field is missing, fill with empty string.\n"
-        "Return ONLY the JSON object, no explanations or markdown.\n\n"
+        "Extract incident details as JSON with keys: "
+        "client_name, incident_date, incident_time, location, incident_type, actions_taken, "
+        "severity, description, reporter, reported_date, organization name, recurrence.\n"
+        "All fields must exist. If unknown, set as empty string.\n"
+        "Dates must be ISO YYYY-MM-DD, times HH:MM:SS.\n"
+        "Return JSON only.\n\n"
         f"Text:\n{transcription}"
     )
 
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    headers = {"Content-Type": "application/json"}
+    data = _ollama_extract_json(prompt)
+    if not isinstance(data, dict):
+        return {k: "" for k in [
+            "client_name", "incident_date", "incident_time", "location", "incident_type",
+            "actions_taken", "severity", "description", "reporter", "reported_date",
+            "organization name", "recurrence"
+        ]}
 
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, headers=headers, timeout=600)
-        resp.raise_for_status()
-        j = resp.json()
+    # Normalize dates and times
+    d, _ = normalize_date(data.get("incident_date", ""))
+    rd, _ = normalize_date(data.get("reported_date", ""))
+    t, _ = normalize_time(data.get("incident_time", ""))
+    data["incident_date"] = d
+    data["reported_date"] = rd
+    data["incident_time"] = t
 
-        raw_response = j.get("response", "")
-        print("🔎 Ollama raw response:", raw_response[:500])  # <-- DEBUG PRINT
-
-        if not raw_response.strip():
-            raise ValueError(f"No response text from Ollama: {j}")
-
-        cleaned_text = clean_markdown_json(raw_response)
-        data = json.loads(cleaned_text)
-
-        # ensure all fields exist
-        for field in FIELDS[1:]:
-            if field not in data:
-                data[field] = ""
-        return data
-
-    except Exception as e:
-        print(f"[❌ Ollama extraction failed] {e}")
-
-    return {field: "" for field in FIELDS[1:]}
+    return data
 
 
-def best_match(value: str, candidates: list, cutoff: float = 0.6) -> str:
-    if not value or not candidates:
-        return value
-    matches = get_close_matches(value, candidates, n=1, cutoff=cutoff)
-    return matches[0] if matches else value
+def _pairwise_best_match(client_guess: str, org_guess: str, df_main: pd.DataFrame) -> tuple[str, str]:
+    """Pick best client/org pair from main.csv."""
+    if df_main.empty or "client_name" not in df_main.columns or "organization name" not in df_main.columns:
+        return client_guess, org_guess
 
-def fuzzy_update_client_org(row: pd.Series, df_main: pd.DataFrame) -> pd.Series:
-    if df_main.empty:
-        return row
-    if "client_name" in df_main.columns:
-        row["client_name"] = best_match(row.get("client_name", ""), df_main["client_name"].dropna().unique().tolist())
-    if "organization name" in df_main.columns:
-        row["organization name"] = best_match(row.get("organization name", ""), df_main["organization name"].dropna().unique().tolist())
-    return row
+    best_score = -1.0
+    best_client, best_org = client_guess, org_guess
+    cg, og = (client_guess or "").lower(), (org_guess or "").lower()
+
+    for _, r in df_main.iterrows():
+        c, o = str(r.get("client_name", "")).lower(), str(r.get("organization name", "")).lower()
+        s_client = fuzz.ratio(cg, c) / 100.0 if cg else 0
+        s_org = fuzz.ratio(og, o) / 100.0 if og else 0
+        score = 0.6 * s_client + 0.4 * s_org
+        if score > best_score:
+            best_score = score
+            best_client = r.get("client_name", "")
+            best_org = r.get("organization name", "")
+
+    return best_client, best_org
+
 
 # --- Main Processing ---
 def process_and_upload() -> list:
-    try:
-        df_processed = load_cloud_csv(INPUT_OBJECT_NAME)
-    except Exception:
-        print(f"{INPUT_OBJECT_NAME} not found.")
-        return []
-
+    # Load processed incidents
+    df_processed = load_cloud_csv(INPUT_OBJECT_NAME)
     if df_processed.empty:
         print("No processed data to add.")
         return []
 
+    # Load or create final CSV
     try:
         df_final = load_cloud_csv(OUTPUT_OBJECT_NAME)
+        if df_final.empty:
+            raise ValueError("Empty file")
         print(f"Loaded existing {OUTPUT_OBJECT_NAME}, {len(df_final)} rows")
     except Exception:
         df_final = pd.DataFrame(columns=FIELDS)
-        print(f"{OUTPUT_OBJECT_NAME} not found, creating new DataFrame")
+        upload_cloud_csv(OUTPUT_OBJECT_NAME, df_final)  # ✅ upload immediately
+        print(f"{OUTPUT_OBJECT_NAME} not found, created empty file")
 
-    # ensure all columns exist
-    for field in FIELDS:
-        if field not in df_final.columns:
-            df_final[field] = ""
+    for c in FIELDS:
+        if c not in df_final.columns:
+            df_final[c] = ""
 
-    existing_filenames = set(df_final['filename'].astype(str).values)
+    existing = set(df_final["filename"].astype(str).values)
 
+    # Load main.csv for client/org matching
     try:
         df_main = load_cloud_csv(MAIN_OBJECT_NAME)
-    except Exception as e:
-        print(f"Could not load main.csv: {e}")
+    except Exception:
         df_main = pd.DataFrame(columns=["client_name", "organization name"])
 
-    new_records_list = []
-
-    for _, row in df_processed.iterrows():
-        fname = str(row.get('filename', '')).strip()
-        if not fname or fname in existing_filenames:
+    new_records = []
+    for _, prow in df_processed.iterrows():
+        fname = str(prow.get("filename", "")).strip()
+        if not fname or fname in existing:
             continue
 
-        transcription_text = row.get('transcription', '') or ''
-        extracted_fields = extract_fields_from_transcription(transcription_text)
+        # Extract fields from transcription
+        extracted = extract_fields_from_transcription(str(prow.get("transcription", "") or ""))
+        best_client, best_org = _pairwise_best_match(
+            extracted.get("client_name", ""), extracted.get("organization name", ""), df_main
+        )
+        extracted["client_name"], extracted["organization name"] = best_client, best_org
 
-        record = {field: "" for field in FIELDS}
-        record.update(extracted_fields)
-        record['filename'] = fname
-        record['emotion'] = row.get('emotion', '')
+        # Build final record
+        rec = {k: "" for k in FIELDS}
+        rec.update(extracted)
+        rec["filename"] = fname
+        rec["emotion"] = str(prow.get("emotion", "") or "")
+        rec["needs_review"] = str(prow.get("needs_review", "") or "")
+        rec["final_confidence"] = str(prow.get("final_confidence", "") or "")
 
-        record_series = pd.Series(record)
-        record_series = fuzzy_update_client_org(record_series, df_main)
+        df_final = pd.concat([df_final, pd.DataFrame([rec])], ignore_index=True)
+        new_records.append(rec)
 
-        df_final = pd.concat([df_final, pd.DataFrame([record_series])], ignore_index=True)
-        new_records_list.append(record_series.to_dict())
-
-    if not new_records_list:
+    if not new_records:
         print("No missing filenames found to process.")
         return []
 
-    df_final = df_final.drop_duplicates(subset='filename', keep='last')
+    df_final = df_final.drop_duplicates(subset="filename", keep="last")
     upload_cloud_csv(OUTPUT_OBJECT_NAME, df_final)
-    print(f"✅ Processed {len(new_records_list)} missing records and updated {OUTPUT_OBJECT_NAME}")
+    print(f"✅ Processed {len(new_records)} missing records and updated {OUTPUT_OBJECT_NAME}")
+    return new_records
 
-    return new_records_list
 
 if __name__ == "__main__":
     process_and_upload()

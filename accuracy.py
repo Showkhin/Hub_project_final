@@ -5,7 +5,7 @@ import os
 
 # === CONFIG ===
 FINAL_FILE = "final.csv"
-PROCESSED_FILE = "stasrt.csv"
+PROCESSED_FILE = "start.csv"
 OLLAMA_MODEL = "gemma3"
 
 # Ollama host and endpoint
