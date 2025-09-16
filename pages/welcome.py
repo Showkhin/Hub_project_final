@@ -4,7 +4,7 @@ from ui_helpers import confirmation_modal, show_csv  # Assuming these are in ui_
 
 # --- Constants for limits ---
 MAX_SAMPLE_SELECTION = 10
-MAX_UPLOAD_FILES = 10
+MAX_UPLOAD_FILES = 20
 
 # Add this at the top of welcome.py show()
 st.sidebar.markdown("## Navigation")

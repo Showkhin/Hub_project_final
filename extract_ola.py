@@ -38,6 +38,7 @@ FIELDS = [
     "emotion"
 ]
 
+
 # --- Helper Functions ---
 def clean_markdown_json(text: str) -> str:
     text = text.strip()
@@ -48,10 +49,12 @@ def clean_markdown_json(text: str) -> str:
         return text.replace("```json", "").replace("```", "")
     return text
 
+
 def extract_fields_from_transcription(transcription: str) -> dict:
     """Send transcription to Ollama API and extract structured fields."""
     if not transcription.strip():
-        return {field: "" for field in FIELDS[1:]}  # empty if no transcription
+        return {field: "" for field in FIELDS[1:]}
+
     prompt = (
         "Extract all incident details from the following text as a JSON object.\n"
         f"The object must have these fields exactly:\n{', '.join(FIELDS[1:])}.\n"
@@ -59,50 +62,59 @@ def extract_fields_from_transcription(transcription: str) -> dict:
         "Return ONLY the JSON object, no explanations or markdown.\n\n"
         f"Text:\n{transcription}"
     )
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,   # ✅ correct for /api/generate
+        "stream": False
+    }
+    headers = {"Content-Type": "application/json"}
+
     try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=600)
+        resp = requests.post(OLLAMA_URL, json=payload, headers=headers, timeout=600)
         resp.raise_for_status()
-        raw_response = resp.json().get("response", "")
+        j = resp.json()
+
+        raw_response = j.get("response", "")
+        if not raw_response:
+            raise ValueError(f"No response text from Ollama: {j}")
+
         cleaned_text = clean_markdown_json(raw_response)
         data = json.loads(cleaned_text)
+
         if isinstance(data, dict):
             for field in FIELDS[1:]:
                 if field not in data:
                     data[field] = ""
             return data
+
     except Exception as e:
-        print(f"Ollama extraction failed: {e}")
+        print(f"[❌ Ollama extraction failed] {e}")
+
     return {field: "" for field in FIELDS[1:]}
 
+
 def best_match(value: str, candidates: list, cutoff: float = 0.6) -> str:
-    """Return the closest match if found, else return empty string."""
+    """Return the closest match if found, else return the original value."""
     if not value or not candidates:
-        return ""
+        return value
     matches = get_close_matches(value, candidates, n=1, cutoff=cutoff)
-    return matches[0] if matches else ""
+    return matches[0] if matches else value
+
 
 def fuzzy_update_client_org(row: pd.Series, df_main: pd.DataFrame) -> pd.Series:
-    """
-    Update client_name and organization name with best match from df_main.
-    If no match found, keep the original value from Ollama API.
-    """
+    """Update client_name and organization name with best match from df_main."""
     if df_main.empty:
         return row
 
     main_clients = df_main['client_name'].dropna().unique().tolist()
     main_orgs = df_main['organization name'].dropna().unique().tolist()
 
-    best_client = best_match(row.get("client_name", ""), main_clients)
-    best_org = best_match(row.get("organization name", ""), main_orgs)
-
-    # Only overwrite if a good match is found
-    if best_client:
-        row["client_name"] = best_client
-    if best_org:
-        row["organization name"] = best_org
+    row["client_name"] = best_match(row.get("client_name", ""), main_clients)
+    row["organization name"] = best_match(row.get("organization name", ""), main_orgs)
 
     return row
+
 
 # --- Main Processing Function ---
 def process_and_upload() -> list:
@@ -125,6 +137,7 @@ def process_and_upload() -> list:
         df_final = pd.DataFrame(columns=FIELDS)
         print(f"{OUTPUT_OBJECT_NAME} not found, creating new DataFrame")
 
+    # Ensure all columns exist
     for field in FIELDS:
         if field not in df_final.columns:
             df_final[field] = ""
@@ -172,9 +185,10 @@ def process_and_upload() -> list:
 
     # Upload final CSV
     upload_cloud_csv(OUTPUT_OBJECT_NAME, df_final)
-    print(f"Processed {len(new_records_list)} missing records and updated {OUTPUT_OBJECT_NAME}")
+    print(f"✅ Processed {len(new_records_list)} missing records and updated {OUTPUT_OBJECT_NAME}")
 
     return new_records_list
+
 
 # --- Entry Point ---
 if __name__ == "__main__":

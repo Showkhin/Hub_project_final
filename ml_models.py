@@ -1,6 +1,4 @@
 import torch
-import os
-
 import whisper
 from transformers import pipeline
 from speechbrain.inference.interfaces import foreign_class
@@ -18,11 +16,11 @@ def get_audio_emotion_model():
     return model
 
 @st.cache_resource(show_spinner=True)
-def get_whisper_model(model_size="medium"):
+def get_whisper_model(model_size="large-v2"):
     try:
         return whisper.load_model(model_size)
     except Exception:
-        return whisper.load_model("small")  # fallback
+        return whisper.load_model("medium")  # fallback
 
 @st.cache_resource(show_spinner=True)
 def get_text_emotion_classifier():

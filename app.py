@@ -1,7 +1,6 @@
 import streamlit as st
 from pages import welcome, processing, results
 
-
 def main():
     if "page" not in st.session_state:
         st.session_state.page = "Welcome"
@@ -21,13 +20,12 @@ def main():
 
 with st.sidebar:
     st.markdown("## Pages")
-    if st.button("🏠 Welcome"):
+    if st.button("🏠 Welcome", key="welcome_button"):
         st.session_state.page = "Welcome"
         st.rerun()
-    if st.button("📊 Results"):
+    if st.button("📊 Results", key="Results_button"):
         st.session_state.page = "Results"
         st.rerun()
-
 
 if __name__ == "__main__":
     main()
