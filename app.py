@@ -8,7 +8,6 @@ def main():
         st.session_state.processing = False
 
     page = st.session_state.page
-
     if page == "Welcome":
         welcome.show()
     elif page == "Processing":

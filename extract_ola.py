@@ -11,6 +11,7 @@ from utils import normalize_date, normalize_time
 INPUT_OBJECT_NAME = "processed_incidents_with_emotion.csv"
 OUTPUT_OBJECT_NAME = "final_emotion_ensemble.csv"
 MAIN_OBJECT_NAME = "main.csv"
+REPORTER_OBJECT_NAME = "reporter.csv"
 
 # --- Ollama API ---
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_STRUCT", "gemma3")
@@ -31,7 +32,6 @@ FIELDS = [
     "reporter",
     "reported_date",
     "organization name",
-    "recurrence",
     "emotion",
     "needs_review",
     "final_confidence",
@@ -90,7 +90,8 @@ def extract_fields_from_transcription(transcription: str) -> dict:
         "client_name, incident_date, incident_time, location, incident_type, actions_taken, "
         "severity, description, reporter, reported_date, organization name, recurrence.\n"
         "All fields must exist. If unknown, set as empty string.\n"
-        "Dates must be ISO YYYY-MM-DD, times HH:MM:SS.\n"
+        "Dates must be ISO YYYY-MM-DD, times HH:MM (no seconds).\n"
+        "Location must be structured as 'house_number street_name, city, state, post_code'.\n"
         "Return JSON only.\n\n"
         f"Text:\n{transcription}"
     )
@@ -106,17 +107,21 @@ def extract_fields_from_transcription(transcription: str) -> dict:
     # Normalize dates and times
     d, _ = normalize_date(data.get("incident_date", ""))
     rd, _ = normalize_date(data.get("reported_date", ""))
-    t, _ = normalize_time(data.get("incident_time", ""))
+    t, _ = normalize_time(data.get("incident_time", ""))  # utils keeps seconds
     data["incident_date"] = d
     data["reported_date"] = rd
-    data["incident_time"] = t
+    # Force HH:MM format only
+    if t and len(t) >= 5:
+        data["incident_time"] = t[:5]
+    else:
+        data["incident_time"] = ""
 
     return data
 
 
-def _pairwise_best_match(client_guess: str, org_guess: str, df_main: pd.DataFrame) -> tuple[str, str]:
+def _pairwise_best_match_client(client_guess: str, org_guess: str, df_main: pd.DataFrame) -> tuple[str, str]:
     """Pick best client/org pair from main.csv."""
-    if df_main.empty or "client_name" not in df_main.columns or "organization name" not in df_main.columns:
+    if df_main.empty:
         return client_guess, org_guess
 
     best_score = -1.0
@@ -136,6 +141,28 @@ def _pairwise_best_match(client_guess: str, org_guess: str, df_main: pd.DataFram
     return best_client, best_org
 
 
+def _pairwise_best_match_reporter(reporter_guess: str, org_guess: str, df_rep: pd.DataFrame) -> tuple[str, str]:
+    """Pick best reporter/org pair from reporter.csv."""
+    if df_rep.empty:
+        return reporter_guess, org_guess
+
+    best_score = -1.0
+    best_reporter, best_org = reporter_guess, org_guess
+    rg, og = (reporter_guess or "").lower(), (org_guess or "").lower()
+
+    for _, r in df_rep.iterrows():
+        rep, o = str(r.get("reporter_name", "")).lower(), str(r.get("organization name", "")).lower()
+        s_rep = fuzz.ratio(rg, rep) / 100.0 if rg else 0
+        s_org = fuzz.ratio(og, o) / 100.0 if og else 0
+        score = 0.6 * s_rep + 0.4 * s_org
+        if score > best_score:
+            best_score = score
+            best_reporter = r.get("reporter_name", "")
+            best_org = r.get("organization name", "")
+
+    return best_reporter, best_org
+
+
 # --- Main Processing ---
 def process_and_upload() -> list:
     # Load processed incidents
@@ -152,7 +179,7 @@ def process_and_upload() -> list:
         print(f"Loaded existing {OUTPUT_OBJECT_NAME}, {len(df_final)} rows")
     except Exception:
         df_final = pd.DataFrame(columns=FIELDS)
-        upload_cloud_csv(OUTPUT_OBJECT_NAME, df_final)  # ✅ upload immediately
+        upload_cloud_csv(OUTPUT_OBJECT_NAME, df_final)
         print(f"{OUTPUT_OBJECT_NAME} not found, created empty file")
 
     for c in FIELDS:
@@ -161,11 +188,16 @@ def process_and_upload() -> list:
 
     existing = set(df_final["filename"].astype(str).values)
 
-    # Load main.csv for client/org matching
+    # Load main.csv and reporter.csv
     try:
         df_main = load_cloud_csv(MAIN_OBJECT_NAME)
     except Exception:
         df_main = pd.DataFrame(columns=["client_name", "organization name"])
+
+    try:
+        df_rep = load_cloud_csv(REPORTER_OBJECT_NAME)
+    except Exception:
+        df_rep = pd.DataFrame(columns=["reporter_name", "organization name"])
 
     new_records = []
     for _, prow in df_processed.iterrows():
@@ -175,10 +207,18 @@ def process_and_upload() -> list:
 
         # Extract fields from transcription
         extracted = extract_fields_from_transcription(str(prow.get("transcription", "") or ""))
-        best_client, best_org = _pairwise_best_match(
+
+        # Client/org from main.csv
+        best_client, best_org_c = _pairwise_best_match_client(
             extracted.get("client_name", ""), extracted.get("organization name", ""), df_main
         )
-        extracted["client_name"], extracted["organization name"] = best_client, best_org
+        extracted["client_name"], extracted["organization name"] = best_client, best_org_c
+
+        # Reporter/org from reporter.csv
+        best_reporter, best_org_r = _pairwise_best_match_reporter(
+            extracted.get("reporter", ""), extracted.get("organization name", ""), df_rep
+        )
+        extracted["reporter"], extracted["organization name"] = best_reporter, best_org_r
 
         # Build final record
         rec = {k: "" for k in FIELDS}
